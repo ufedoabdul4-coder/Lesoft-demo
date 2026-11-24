@@ -8,6 +8,7 @@ import type {
   HomepageContent,
   PartnersContent,
   Project,
+  PublishedDocument,
 } from '@/lib/types';
 import { getConfiguredClient } from '@/sanity/lib/client';
 import {
@@ -19,45 +20,134 @@ import {
   partnersQuery,
   projectsQuery,
 } from '@/sanity/lib/queries';
+import { singletonDocumentIds } from '@/sanity/lib/singletons';
 
 const REVALIDATE_SECONDS = 60;
+
+const legacyHomepageCopy = new Set([
+  'MRS LESOFTS DEMONSTRATION',
+  'A SIMPLE DEMO PROJECT',
+  'A VERY GOOD DESCRIPTION OF COMPETENCE',
+  'AN IMAGE DISPLAYING FOREX COMPETENCE',
+  'AN IMAGE OF FOREX COMPETENCE',
+  'BABA J',
+]);
 
 type FetchOptions = {
   query: string;
   tag: string;
-  note: string;
-  validate?: (value: unknown) => boolean;
 };
 
-const unusableCopyPattern = /demo|demonstration|forex|meridian|sample/i;
+type SingletonFetchOptions<T> = FetchOptions & {
+  note: string;
+  preferredDocumentId: string;
+  validate: (value: unknown) => boolean;
+};
+
+function emptyResult<T>(note?: string): ContentResult<T> {
+  return { data: null, source: 'empty', note };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function hasText(value: unknown): value is string {
+  return typeof value === 'string' && value.trim().length > 0;
+}
+
+function hasImage(value: unknown): boolean {
+  return isRecord(value) && hasText(value.url) && hasText(value.alt);
+}
+
+function hasNonEmptyStrings(value: unknown): boolean {
+  return Array.isArray(value) && value.length > 0 && value.every(hasText);
+}
+
+function isValidEmail(value: unknown): boolean {
+  return hasText(value) && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value.trim());
+}
+
+function isLegacyHomepageCopy(value: Record<string, unknown>): boolean {
+  const values = [value.heading, value.subtitle, value.description, value.ctaText];
+
+  if (isRecord(value.heroImage)) {
+    values.push(value.heroImage.alt);
+  }
+
+  return values.some((item) => hasText(item) && legacyHomepageCopy.has(item.trim().toUpperCase()));
+}
 
 function isValidHomepageContent(value: unknown): boolean {
-  if (!value || typeof value !== 'object') {
+  if (!isRecord(value)) {
     return false;
   }
 
-  const content = value as Partial<HomepageContent>;
-  const fields = [
-    content.heading,
-    content.subtitle,
-    content.description,
-    content.ctaText,
-    content.ctaLink,
-    content.heroImage?.url,
-    content.heroImage?.alt,
-  ];
-
-  return fields.every(
-    (field) => typeof field === 'string' && field.trim().length > 0 && !unusableCopyPattern.test(field),
+  return (
+    hasText(value.heading) &&
+    hasText(value.subtitle) &&
+    hasText(value.description) &&
+    hasImage(value.heroImage) &&
+    hasText(value.ctaText) &&
+    hasText(value.ctaLink) &&
+    !isLegacyHomepageCopy(value)
   );
 }
 
-async function fetchContent<T>(options: FetchOptions): Promise<ContentResult<T>> {
+function isValidAboutContent(value: unknown): boolean {
+  if (!isRecord(value)) {
+    return false;
+  }
+
+  return (
+    hasText(value.introduction) &&
+    hasText(value.mission) &&
+    hasText(value.vision) &&
+    hasImage(value.image)
+  );
+}
+
+function isValidPartnersContent(value: unknown): boolean {
+  if (!isRecord(value)) {
+    return false;
+  }
+
+  return (
+    hasText(value.introduction) &&
+    hasNonEmptyStrings(value.benefits) &&
+    hasText(value.enquiryCtaText) &&
+    hasText(value.enquiryCtaLink)
+  );
+}
+
+function isValidContactContent(value: unknown): boolean {
+  if (!isRecord(value)) {
+    return false;
+  }
+
+  return (
+    isValidEmail(value.email) &&
+    hasText(value.phone) &&
+    hasText(value.address) &&
+    hasText(value.contactDescription)
+  );
+}
+
+function stripDocumentMetadata<T>(document: PublishedDocument<T>): T {
+  const content = { ...document } as Record<string, unknown>;
+
+  delete content._id;
+  delete content._createdAt;
+  delete content._updatedAt;
+
+  return content as T;
+}
+
+async function fetchSanity<T>(options: FetchOptions): Promise<{ result: T | null; errorNote?: string }> {
   if (!isSanityConfigured()) {
     return {
-      data: null,
-      source: 'empty',
-      note: 'Sanity credentials are not configured in this environment.',
+      result: null,
+      errorNote: 'Sanity credentials are not configured in this environment.',
     };
   }
 
@@ -69,43 +159,63 @@ async function fetchContent<T>(options: FetchOptions): Promise<ContentResult<T>>
       },
     });
 
-    if (!result || (Array.isArray(result) && result.length === 0)) {
-      return { data: null, source: 'empty', note: options.note };
-    }
-
-    if (options.validate && !options.validate(result)) {
-      return {
-        data: null,
-        source: 'empty',
-        note: 'Published content is not available.',
-      };
-    }
-
-    return { data: result, source: 'sanity' };
+    return { result: result ?? null };
   } catch (error) {
     console.error('Unable to load content from Sanity:', error);
-    return {
-      data: null,
-      source: 'empty',
-      note: 'Published content could not be loaded.',
-    };
+    return { result: null, errorNote: 'Published content could not be loaded.' };
   }
 }
 
+async function fetchContent<T>(options: FetchOptions & { note: string }): Promise<ContentResult<T>> {
+  const { result, errorNote } = await fetchSanity<T>(options);
+
+  if (errorNote) {
+    return emptyResult(errorNote);
+  }
+
+  if (!result || (Array.isArray(result) && result.length === 0)) {
+    return emptyResult(options.note);
+  }
+
+  return { data: result, source: 'sanity' };
+}
+
+async function fetchSingletonContent<T>(options: SingletonFetchOptions<T>): Promise<ContentResult<T>> {
+  const { result, errorNote } = await fetchSanity<PublishedDocument<T>[]>(options);
+
+  if (errorNote) {
+    return emptyResult(errorNote);
+  }
+
+  const documents = Array.isArray(result) ? result : [];
+  const validDocuments = documents.filter(options.validate);
+  const selected =
+    validDocuments.find((document) => document._id === options.preferredDocumentId) ?? validDocuments[0];
+
+  if (!selected) {
+    return emptyResult(options.note);
+  }
+
+  return { data: stripDocumentMetadata(selected), source: 'sanity' };
+}
+
 export function getHomepageContent() {
-  return fetchContent<HomepageContent>({
+  return fetchSingletonContent<HomepageContent>({
     query: homepageQuery,
     tag: 'homepage',
     note: 'Published homepage content is not available.',
+    preferredDocumentId: singletonDocumentIds.homepage,
     validate: isValidHomepageContent,
   });
 }
 
 export function getAboutContent() {
-  return fetchContent<AboutContent>({
+  return fetchSingletonContent<AboutContent>({
     query: aboutQuery,
     tag: 'about',
     note: 'Published about content is not available.',
+    preferredDocumentId: singletonDocumentIds.about,
+    validate: isValidAboutContent,
   });
 }
 
@@ -134,17 +244,21 @@ export function getProjects() {
 }
 
 export function getPartnersContent() {
-  return fetchContent<PartnersContent>({
+  return fetchSingletonContent<PartnersContent>({
     query: partnersQuery,
     tag: 'partners',
     note: 'Published partner content is not available.',
+    preferredDocumentId: singletonDocumentIds.partners,
+    validate: isValidPartnersContent,
   });
 }
 
 export function getContactContent() {
-  return fetchContent<ContactContent>({
+  return fetchSingletonContent<ContactContent>({
     query: contactQuery,
     tag: 'contact',
     note: 'Published contact content is not available.',
+    preferredDocumentId: singletonDocumentIds.contactInfo,
+    validate: isValidContactContent,
   });
 }

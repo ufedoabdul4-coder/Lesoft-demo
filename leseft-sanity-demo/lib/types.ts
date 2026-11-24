@@ -56,6 +56,12 @@ export type ContactContent = {
   contactDescription: string;
 };
 
+export type PublishedDocument<T> = T & {
+  _id: string;
+  _createdAt: string;
+  _updatedAt: string;
+};
+
 export type ContentResult<T> = {
   data: T | null;
   source: 'sanity' | 'empty';

@@ -3,7 +3,20 @@ const imageProjection = `{
   "alt": coalesce(alt, "")
 }`;
 
-export const homepageQuery = `*[_type == "homepage"][0]{
+const singletonOrder = '| order(_updatedAt desc, _createdAt desc, _id asc)';
+const singletonMetadata = '_id, _createdAt, _updatedAt,';
+
+export const homepageQuery = `*[
+  _type == "homepage"
+  && defined(heading)
+  && defined(subtitle)
+  && defined(description)
+  && defined(heroImage.asset)
+  && defined(heroImage.alt)
+  && defined(ctaText)
+  && defined(ctaLink)
+] ${singletonOrder} {
+  ${singletonMetadata}
   heading,
   subtitle,
   description,
@@ -12,7 +25,15 @@ export const homepageQuery = `*[_type == "homepage"][0]{
   ctaLink
 }`;
 
-export const aboutQuery = `*[_type == "about"][0]{
+export const aboutQuery = `*[
+  _type == "about"
+  && defined(introduction)
+  && defined(mission)
+  && defined(vision)
+  && defined(image.asset)
+  && defined(image.alt)
+] ${singletonOrder} {
+  ${singletonMetadata}
   introduction,
   mission,
   vision,
@@ -42,14 +63,28 @@ export const projectsQuery = `*[_type == "project"] | order(orderRank asc, title
   "image": image ${imageProjection}
 }`;
 
-export const partnersQuery = `*[_type == "partners"][0]{
+export const partnersQuery = `*[
+  _type == "partners"
+  && defined(introduction)
+  && count(benefits) > 0
+  && defined(enquiryCtaText)
+  && defined(enquiryCtaLink)
+] ${singletonOrder} {
+  ${singletonMetadata}
   introduction,
   benefits,
   enquiryCtaText,
   enquiryCtaLink
 }`;
 
-export const contactQuery = `*[_type == "contactInfo"][0]{
+export const contactQuery = `*[
+  _type == "contactInfo"
+  && defined(email)
+  && defined(phone)
+  && defined(address)
+  && defined(contactDescription)
+] ${singletonOrder} {
+  ${singletonMetadata}
   email,
   phone,
   address,
