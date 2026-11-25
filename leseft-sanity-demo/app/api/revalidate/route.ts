@@ -1,36 +1,77 @@
-import { timingSafeEqual } from 'node:crypto';
-
 import { revalidatePath, revalidateTag } from 'next/cache';
-import { NextResponse } from 'next/server';
+import { type NextRequest, NextResponse } from 'next/server';
+import { parseBody } from 'next-sanity/webhook';
 
 export const runtime = 'nodejs';
 
-function secretsMatch(provided: string, expected: string): boolean {
-  const providedBuffer = Buffer.from(provided);
-  const expectedBuffer = Buffer.from(expected);
+type WebhookPayload = {
+  _type?: string;
+  _id?: string;
+};
 
-  return providedBuffer.length === expectedBuffer.length && timingSafeEqual(providedBuffer, expectedBuffer);
-}
+const publicPaths = [
+  '/',
+  '/about',
+  '/commodities',
+  '/equipment',
+  '/projects',
+  '/partners',
+  '/contact',
+] as const;
 
-export async function POST(request: Request) {
-  const configuredSecret = process.env.SANITY_REVALIDATE_SECRET;
+const revalidationMap: Record<string, { tags: string[]; paths: string[] }> = {
+  homepage: { tags: ['homepage'], paths: ['/'] },
+  about: { tags: ['about'], paths: ['/about'] },
+  commodity: { tags: ['commodities'], paths: ['/', '/commodities'] },
+  equipment: { tags: ['equipment'], paths: ['/', '/equipment'] },
+  project: { tags: ['projects'], paths: ['/', '/projects'] },
+  partners: { tags: ['partners'], paths: ['/partners'] },
+  contactInfo: { tags: ['contact'], paths: [...publicPaths] },
+};
 
-  if (!configuredSecret) {
+export async function POST(request: NextRequest) {
+  const secret = process.env.SANITY_REVALIDATE_SECRET?.trim();
+  const expectedProjectId = process.env.NEXT_PUBLIC_SANITY_PROJECT_ID?.trim();
+  const expectedDataset = process.env.NEXT_PUBLIC_SANITY_DATASET?.trim();
+
+  if (!secret || !expectedProjectId || !expectedDataset) {
     return NextResponse.json({ message: 'Revalidation is not configured on this deployment.' }, { status: 503 });
   }
 
-  const url = new URL(request.url);
-  const providedSecret = url.searchParams.get('secret') ?? request.headers.get('x-revalidate-secret');
+  const projectId = request.headers.get('sanity-project-id');
+  const dataset = request.headers.get('sanity-dataset');
 
-  if (!providedSecret || !secretsMatch(providedSecret, configuredSecret)) {
-    return NextResponse.json({ message: 'Unauthorized.' }, { status: 401 });
+  if (projectId !== expectedProjectId || dataset !== expectedDataset) {
+    return NextResponse.json({ message: 'Unauthorized source.' }, { status: 403 });
   }
 
-  revalidateTag('sanity-content');
-  revalidatePath('/', 'layout');
+  const { isValidSignature, body } = await parseBody<WebhookPayload>(request, secret, true);
+
+  if (!isValidSignature) {
+    return NextResponse.json({ message: 'Invalid signature.' }, { status: 401 });
+  }
+
+  const documentType = body?._type;
+
+  if (!documentType || !revalidationMap[documentType]) {
+    return NextResponse.json({ message: 'Unsupported document type.' }, { status: 400 });
+  }
+
+  const { tags, paths } = revalidationMap[documentType];
+
+  for (const tag of tags) {
+    revalidateTag(tag);
+  }
+
+  for (const path of paths) {
+    revalidatePath(path);
+  }
 
   return NextResponse.json({
     revalidated: true,
+    type: documentType,
+    tags,
+    paths,
     at: new Date().toISOString(),
   });
 }
